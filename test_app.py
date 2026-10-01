@@ -2,6 +2,7 @@ import json
 import os
 import random
 import re
+import shutil
 import socket
 import sqlite3
 import subprocess
@@ -18,6 +19,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app import Conflict, Handler, Ledger, LedgerError, ThreadingHTTPServer, main
+import demo
 
 
 def process_batch(arguments):
@@ -569,6 +571,11 @@ class LedgerTests(unittest.TestCase):
 
     def test_demo_and_persisted_check_run_against_authenticated_http(self):
         environment = {**os.environ, "HOST": "0.0.0.0", "PORT": "0", "LEDGER_DB_PATH": str(self.path), "LEDGER_API_TOKEN": "test-" + "x" * 40, "RAILWAY_ENVIRONMENT_ID": "test", "RAILWAY_VOLUME_MOUNT_PATH": self.directory.name}
+        demo_script = Path(self.directory.name) / "demo.py"
+        shutil.copyfile(Path(__file__).parent / "demo.py", demo_script)
+        demo_script.with_name(".env").write_text("LEDGER_API_TOKEN=" + environment["LEDGER_API_TOKEN"] + "\n", encoding="utf-8")
+        client_environment = {**environment}
+        client_environment.pop("LEDGER_API_TOKEN")  # Exercise file loading, not the user's real .env.
         logfile = Path(self.directory.name) / "server.log"
         for flags in ([], ["--check-only"]):
             with logfile.open("w", encoding="utf-8") as output:
@@ -583,8 +590,8 @@ class LedgerTests(unittest.TestCase):
                         self.assertIsNone(process.poll(), logs)
                         self.assertLess(time.monotonic(), deadline, "CLI server did not start: " + logs)
                         time.sleep(0.05)
-                    command = [sys.executable, "-B", "demo.py", "--url", f"http://127.0.0.1:{match[1]}", "--prefix", "integration-demo"]
-                    result = subprocess.run(command + flags, cwd=Path(__file__).parent, env=environment, capture_output=True, text=True, timeout=30)
+                    command = [sys.executable, "-B", str(demo_script), "--url", f"http://127.0.0.1:{match[1]}", "--prefix", "integration-demo"]
+                    result = subprocess.run(command + flags, cwd=Path(__file__).parent, env=client_environment, capture_output=True, text=True, timeout=30)
                     self.assertEqual(0, result.returncode, result.stdout + result.stderr)
                     self.assertIn("ALL CHECKS PASSED", result.stdout)
                 finally:
@@ -595,6 +602,34 @@ class LedgerTests(unittest.TestCase):
                         process.kill()
                         process.wait(timeout=5)
         self.assertTrue(self.ledger.verify()["ok"])
+
+    def test_demo_token_file_loading_and_environment_precedence(self):
+        script = Path(self.directory.name) / "demo.py"
+        path = script.with_name(".env")
+        token = "test-" + "x" * 40
+        with patch("demo.__file__", str(script)), patch.dict(os.environ, {}, clear=True):
+            self.assertIsNone(demo.demo_token())
+            path.write_text("# Local reviewer credential\nOTHER_KEY=ignored\n LEDGER_API_TOKEN = '" + token + "'\n", encoding="utf-8-sig")
+            self.assertEqual(token, demo.demo_token())
+            path.write_text("LEDGER_API_TOKEN=" + token + "\nLEDGER_API_TOKEN=duplicate\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                demo.demo_token()
+            with patch.dict(os.environ, {"LEDGER_API_TOKEN": "test-" + "y" * 40}):
+                self.assertEqual("test-" + "y" * 40, demo.demo_token())
+            for value in ("", "short", "Bearer " + token, "x" * 256, token + "\t", "non-ascii-" + "\u00e9" * 40):
+                with self.subTest(value=value), patch.dict(os.environ, {"LEDGER_API_TOKEN": value}), self.assertRaises(ValueError) as error:
+                    demo.demo_token()
+                if value:
+                    self.assertNotIn(value, str(error.exception))
+            path.write_text("OTHER_KEY=ignored\n", encoding="utf-8")
+            self.assertIsNone(demo.demo_token())
+
+    def test_remote_demo_missing_token_fails_before_network(self):
+        with patch("demo.demo_token", return_value=None), patch("sys.argv", ["demo.py", "--url", "https://example.invalid"]), patch("demo.build_opener") as opener, patch("sys.stderr"):
+            with self.assertRaises(SystemExit) as error:
+                demo.main()
+            self.assertEqual(2, error.exception.code)
+            opener.assert_not_called()
 
     def test_demo_rejects_unsafe_remote_url_before_any_request(self):
         for url in ("http://example.com", "https://user:password@example.com", "https://example.com/unexpected", "https://example.com?query=1", "file:///etc/passwd"):

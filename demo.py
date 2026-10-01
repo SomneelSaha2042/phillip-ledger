@@ -7,6 +7,7 @@ import re
 import sys
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -21,6 +22,28 @@ class NoRedirects(HTTPRedirectHandler):
 def check(condition, message):
     if not condition:
         raise RuntimeError(message)
+
+
+def demo_token():
+    """Read one reviewer token; process environment wins over the script's local .env."""
+    token = os.environ.get("LEDGER_API_TOKEN")
+    if token is None:
+        path = Path(__file__).with_name(".env")
+        values = []
+        if path.is_file():
+            for line in path.read_text(encoding="utf-8-sig").splitlines():
+                if line.strip() and not line.lstrip().startswith("#") and "=" in line:
+                    key, value = line.split("=", 1)
+                    if key.strip() == "LEDGER_API_TOKEN":
+                        values.append(value.strip())
+        if len(values) > 1:
+            raise ValueError("local .env must contain only one LEDGER_API_TOKEN assignment")
+        token = values[0] if values else None
+        if token and len(token) > 1 and token[0] == token[-1] and token[0] in ("'", '"'):
+            token = token[1:-1]
+    if token is not None and not re.fullmatch(r"[\x21-\x7e]{32,255}", token):
+        raise ValueError("LEDGER_API_TOKEN must contain 32-255 printable ASCII characters without spaces; use only the token, not Bearer. Process environment overrides .env.")
+    return token
 
 
 def main():
@@ -40,7 +63,9 @@ def main():
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", prefix):
         parser.error("--prefix must contain 1-100 ASCII letters, digits, underscores or hyphens")
     base = args.url.rstrip("/")
-    token = os.environ.get("LEDGER_API_TOKEN")
+    token = demo_token()
+    if url.hostname not in {"127.0.0.1", "localhost", "::1"} and not token:
+        parser.error("remote demos require LEDGER_API_TOKEN in the process environment or a .env file next to demo.py")
     opener = build_opener(NoRedirects())
 
     def request(method, path, body=None, key=None, expected=None):
@@ -58,6 +83,8 @@ def main():
             status = response.code
             result = json.loads(response.read())
         wanted = expected if expected is not None else (200 if method == "GET" else 201)
+        if status == 401 and wanted != 401:
+            raise RuntimeError("authentication rejected: verify the active deployment's token; LEDGER_API_TOKEN in the process environment overrides the local .env file")
         check(status == wanted, f"{method} {path}: expected {wanted}, got {status}: {result}")
         return result
 
