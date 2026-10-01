@@ -4,6 +4,11 @@ A small, durable JSON API for moving money between accounts. Built for the inter
 
 **Reviewer quick start:** start the server, run `python demo.py`, then run `python -B -m unittest -v`. The demo checks real HTTP responses and prints the balances after each step. No UI, package installation or external database is required.
 
+- [Run locally](#run-locally) — an independent SQLite ledger on your computer.
+- [Test the existing live Railway deployment](#test-the-existing-live-railway-deployment) — no server setup needed; obtain the review token privately.
+- [Automated verification](#verification-and-submission) — isolated tests, no live-service writes.
+- [CONTEXT.md](CONTEXT.md) — code map, safety rules and recorded verification status.
+
 ## Run locally
 
 Requirements: Python **3.12+** with SQLite **3.37+** (for STRICT tables). Check your installation:
@@ -13,7 +18,14 @@ python --version
 python -c "import sqlite3; print(sqlite3.sqlite_version)"
 ```
 
-Open a terminal in the repository directory and start the API:
+For a fresh checkout:
+
+```sh
+git clone https://github.com/SomneelSaha2042/phillip-ledger.git
+cd phillip-ledger
+```
+
+If you already have the repository, use that directory instead. Open a terminal there and start the API:
 
 ```sh
 python app.py serve --db ledger.db --port 8000
@@ -36,6 +48,49 @@ python demo.py --url http://127.0.0.1:8001
 ```
 
 Opening `/` in a browser shows API information, not a dashboard. `/health` returns `{"status":"ok"}` when the database can be read; `/favicon.ico` is not implemented.
+
+Local startup needs no token. The **server does not load `.env`**; it reads process environment variables and CLI options. If you explicitly set `LEDGER_API_TOKEN` before starting it, the local demo must use the same token. An existing live token in `.env` does not enable authentication on the local server. Local and Railway databases are completely separate.
+
+## Test the existing live Railway deployment
+
+Live API: **https://phillip-ledger-production.up.railway.app**
+
+Public readiness check: [GET /health](https://phillip-ledger-production.up.railway.app/health). Expect `{"status":"ok"}`. This confirms database access, not financial correctness; all ledger routes require the review token. Availability is not guaranteed indefinitely.
+
+1. Clone/open this repository and ensure Python 3.12+ is available. You do not need Docker, a local server or a Railway account to test the deployed API.
+2. Obtain the token privately from the project owner. Create a UTF-8 file named **`.env`** next to **`demo.py`**, with this assignment, replacing the placeholder:
+
+   ```dotenv
+   LEDGER_API_TOKEN=PASTE_THE_ACTUAL_REVIEW_TOKEN_HERE
+   ```
+
+   Paste only the actual token: no `Bearer ` prefix, no angle brackets, and no spaces. `.env` is excluded by both Git and Docker; never publish it. The demo reads this file automatically, including when invoked from another working directory. It accepts a plain assignment or a value in matching single/double quotes; comments must be on their own lines. It reads only this one key, not arbitrary shell commands or variable interpolation.
+3. Run the exact command below; **no separate environment-loading command is necessary**:
+
+   ```sh
+   python demo.py --url https://phillip-ledger-production.up.railway.app
+   ```
+
+   Expect `ALL CHECKS PASSED`. This creates unique synthetic accounts, transfers/reversals and reconciliation reports in the shared live ledger. Records are immutable and remain after the demo. Use synthetic data only.
+4. Save the prefix and follow-up command printed by the script. You can run the `--check-only` command immediately to verify saved history and safe retries. To prove **redeploy persistence**, ask the owner to restart/redeploy the Railway service first, then run that command again against the same URL. Merely running it twice does not test a redeploy.
+
+**Token precedence:** an existing `LEDGER_API_TOKEN` in the Python process environment overrides `.env`, even if that value is stale or invalid. If you previously set a different token, clear it before relying on the file:
+
+PowerShell:
+
+```powershell
+Remove-Item Env:LEDGER_API_TOKEN -ErrorAction SilentlyContinue
+python demo.py --url https://phillip-ledger-production.up.railway.app
+```
+
+macOS/Linux:
+
+```sh
+unset LEDGER_API_TOKEN
+python3 demo.py --url https://phillip-ledger-production.up.railway.app
+```
+
+Environment-only use is also supported: set the token in the **same terminal** that launches Python. Shell variables do not automatically transfer to a separate terminal, another user's process or an agent's tools. A missing remote token fails before any network request; invalid formatting is reported without printing its value.
 
 ## What the demo proves
 
@@ -66,7 +121,7 @@ Use the **actual printed prefix**, not the placeholder. This verifies saved bala
 
 ## Try requests yourself
 
-This PowerShell example uses unique account names and works locally or against Railway. For Railway, change the base URL to HTTPS and set the token as described below.
+This PowerShell example uses unique account names and works locally or against Railway. For Railway, change `$base` to `https://phillip-ledger-production.up.railway.app` and run `$env:LEDGER_API_TOKEN = Read-Host 'Paste the review token'` in that same terminal first. **Only `demo.py` loads `.env` automatically; PowerShell/curl/API clients do not.** If the local server is token-protected, supply its token too.
 
 ```powershell
 $base = 'http://127.0.0.1:8000'
@@ -104,17 +159,17 @@ The root `Dockerfile` is [automatically detected by Railway](https://docs.railwa
 
 1. Push the source to your GitHub repository. Do **not** commit databases or secrets; the ignore files exclude them.
 2. Create a Railway project/service from that GitHub repository. The Dockerfile supplies the build and start command; leave custom build/start commands unset.
-3. Attach a **persistent volume**, mounted at **/data**, to this service. Keep **one instance**. The database, WAL and shared-memory files must stay on that volume. Startup refuses a Railway configuration with no mounted volume or a database path outside it. Railway's [volume reference](https://docs.railway.com/volumes/reference) explains storage and single-instance/redeploy limitations.
+3. Attach a **persistent volume**, mounted at **/data**, to this service. From the project canvas, create a volume and select the ledger service, then set its mount path to `/data` and apply the change; see Railway's [volume setup instructions](https://docs.railway.com/volumes). Keep **one instance**. The database, WAL and shared-memory files must stay on that volume. Startup refuses a Railway configuration with no mounted volume or a database path outside it. Railway's [volume reference](https://docs.railway.com/volumes/reference) explains storage and single-instance/redeploy limitations.
 4. Generate a review token on your computer:
 
    ```sh
    python -c "import secrets; print(secrets.token_urlsafe(32))"
    ```
 
-   Add it to the service's Variables as **LEDGER_API_TOKEN**. Keep it secret; it grants access to the entire synthetic ledger. The image already sets **LEDGER_DB_PATH=/data/ledger.db**. Do not override PORT or the start command.
+   Add it to the service's Variables as **LEDGER_API_TOKEN**, paste the value without quotes and apply/redeploy. Keep it secret; it grants access to the entire synthetic ledger. The image already sets **LEDGER_DB_PATH=/data/ledger.db**. Local `.env` is not uploaded to Railway; configure the server variable there separately. Leave the start command unset.
 5. In deployment settings, set the **healthcheck path to /health** and use an **On Failure** restart policy. The health route is public and returns no account data. Railway [uses the injected PORT for healthchecks](https://docs.railway.com/deployments/healthchecks).
-6. Deploy/apply the changes, then generate a public domain in the service's networking settings. Open https://YOUR-DOMAIN/health; expect `{"status":"ok"}`. Use HTTPS for all external calls.
-7. Test from your computer, using the same token:
+6. Deploy/apply the changes, then generate a public domain in the service's networking settings. Keep the detected **target port**, or use the number in the log line `Ledger listening on http://0.0.0.0:PORT_NUMBER`. It must match the runtime `PORT`; do not assume the local default 8000. If you deliberately want 8000, set `PORT=8000`, redeploy and choose target port 8000. See Railway's [target port documentation](https://docs.railway.com/networking/domains/working-with-domains#target-ports). Open https://YOUR-DOMAIN/health; expect `{"status":"ok"}`. Use HTTPS for all external calls.
+7. Test from your computer using the same token. Prefer the `.env` setup in [live testing](#test-the-existing-live-railway-deployment), substituting your new domain. Alternatively, set the process environment directly:
 
    PowerShell:
 
@@ -189,7 +244,10 @@ For FX, amount is the **source-currency amount** and exchange_rate means **desti
 | --port / PORT | 8000 | CLI overrides environment; Railway supplies PORT |
 | LEDGER_API_TOKEN | unset | Optional for loopback, required for public binding; no secret CLI argument |
 
-- **401:** set the same token in the client terminal and server/Railway environment. Browsers do not automatically send it.
+`demo.py` also reads the ignored `.env` beside the script when that environment variable is absent. `app.py`, Docker and manual API clients do not automatically read that file. Setting `.env` never modifies Railway's configuration.
+
+- **401:** the API is reachable but did not accept the sent token. Verify that `.env` has the active deployment's token, clear a stale process variable (it takes precedence), and ensure the Railway variable changes were applied/redeployed in the correct service/environment. Browsers do not automatically send bearer tokens. Never paste the token into an issue or chat.
+- **Remote token missing:** create `.env` next to `demo.py`, or set `LEDGER_API_TOKEN` in the terminal that launches Python. A `.env.txt` file is not `.env`; on Windows enable file extensions before naming it.
 - **Railway volume guard:** attach /data, apply/redeploy, and keep LEDGER_DB_PATH inside the mount. Do not work around the guard with ephemeral storage.
 - **Unable to open database:** check the parent directory/volume exists and is writable.
 - **Address already in use:** use another port and the matching demo --url.
@@ -211,13 +269,13 @@ In a second terminal with the same token, run `python demo.py --url http://127.0
 python -B -m unittest -v
 ```
 
-The **32 tests** use temporary databases and real loopback HTTP servers; they do not alter your running ledger. Coverage: threaded retry/overdraft races; four independent writer processes posting 401 unique transfers while audits run; abrupt exits before/after commit; lock contention; 500 seeded operations checked against an independent exact-fraction model; malformed HTTP/JSON; money/rate bounds; FX rounding/reversals; pagination; corruption detection; UTC month boundaries; immutable reports; unknown-schema refusal; bearer authentication; deployment guards; the executable demo against a real CLI server, followed by a process restart and persisted retry check. Run from the repository directory and permit child processes/loopback sockets. The contention test intentionally waits five seconds.
+The **34 tests** use temporary databases and real loopback HTTP servers; they do not alter your running ledger. Coverage: threaded retry/overdraft races; four independent writer processes posting 401 unique transfers while audits run; abrupt exits before/after commit; lock contention; 500 seeded operations checked against an independent exact-fraction model; malformed HTTP/JSON; money/rate bounds; FX rounding/reversals; pagination; corruption detection; UTC month boundaries; immutable reports; unknown-schema refusal; bearer authentication; deployment guards; `.env` loading and environment precedence; missing-token rejection before networking; the executable demo using a temporary token file against a real CLI server, followed by a process restart and persisted retry check. Tests do not read or use your real `.env` token. Run from the repository directory and permit child processes/loopback sockets. The contention test intentionally waits five seconds.
 
 These are correctness tests, not a throughput benchmark, penetration test, physical-power-loss simulation or proof of a live Railway deployment. Before submitting:
 
-1. Run the suite; expect **Ran 32 tests / OK**.
+1. Run the suite; expect **Ran 34 tests / OK**.
 2. Run the local demo and its restart check; expect **ALL CHECKS PASSED**.
 3. Deploy with volume/token; run the live demo and redeploy check.
 4. Share the **GitHub repository link** (the required submission), HTTPS URL and privately supplied review token. Never publish an untested URL or token in the repository.
 
-Files: app.py (API/domain/storage), test_app.py (verification), demo.py (live HTTP walkthrough), Dockerfile (runtime) and this README. Generated databases, real-money fixtures and credentials do not belong in the submission.
+Files: app.py (API/domain/storage), test_app.py (verification), demo.py (live HTTP walkthrough), Dockerfile (runtime), README.md (reviewer instructions) and [CONTEXT.md](CONTEXT.md) (maintainer/agent orientation). Generated databases, real-money fixtures and credentials do not belong in the submission.
